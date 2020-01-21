@@ -1,0 +1,468 @@
+---
+title: "LISI 3 gasses 3 acq each"
+author: "Davidheiser"
+date: "Aug 2019"
+output: html_document
+---
+
+Code version: updated July 2019
+
+MANUALLY UPDATE: user defined, session-specific information
+```{r manual-definitions}
+User <- "Brett"
+session <-"LISI 3 gases" 
+MS.ID<-"Bert"   #don't change this unless we get a new mass spec or you are using this for data from another lab :)   
+
+```
+
+## Install custom packages
+These will change frequently over the next couple of years, so it is wise to reinstall them everytime, to be sure you are using the up-to-date versions of the functions that the code below needs. If there haven't been any changes to the codes, it will say that and not reinstall them.
+```{r install, eval = FALSE}
+#devtools::install_github("KopfLab/isoreader")
+
+#devtools::install_github("cubessil/isoprocessCUBES") #general CUBESsil lab stuff
+
+#devtools::install_github("cubessil/CUBESSILclumpedmath") #only for processing clumped data
+
+#devtools::install_github("cubessil/clumpsDRcodes") #only for processing clumped data
+
+```
+
+## Load libraries and clumped isotope standard values
+
+```{r message = FALSE, warning = FALSE}
+library(rlang)
+library(plotly)
+library(isoreader)
+library(tidyverse)
+library(minpack.lm)
+library(CUBESSILclumpedmath)
+```
+
+## Load all did files in a folder (or multiple folders)
+
+Catches any errors and exceptions that might occur and reports them as "problems".
+```{r load-data}
+readrawdata <-T
+if (readrawdata){
+folder <- file.path("one side MV","190812_Brett test LISI oneside4")
+  stopifnot(file.exists(folder))
+  tictoc::tic()
+  did_files <- iso_read_dual_inlet(folder,cache = TRUE, quiet = FALSE, read_vendor_data_table = FALSE, parallel = TRUE)
+  tictoc::toc()
+  did_files <- iso_filter_files_with_problems(did_files)  
+  saveRDS(did_files, paste0(session, "_did_files.RDS"))
+}else{
+  did_files <- readRDS(paste0(session, "_did_files.RDS"))
+}
+
+  rawdata <- did_files %>% iso_get_raw_data(include_file_info = c(Analysis, file_datetime, Preparation, `Identifier 1`, `Identifier 2`, MS_integration_time.s, Method, measurement_info))
+ 
+```
+##This file is run with 5sec int and 150 cyc with largist to normal size sample. 
+```{r}
+samplegasside <- rawdata %>% filter(type=="sample") %>%
+  mutate( r45o44 = v45.mV / v44.mV,
+          r46o44 = v46.mV / v44.mV,  
+          r47o44 = v47.mV / v44.mV,  
+          r48o44 = v48.mV / v44.mV,  
+          r49o44 = v49.mV / v44.mV,
+          logr45o44 = log(v45.mV)- log(v44.mV),
+          logr46o44 = log(v46.mV)- log(v44.mV),
+          logr47o44 = log(v47.mV)- log(v44.mV),  
+          logr48o44 = log(v48.mV)- log(v44.mV)
+          ) 
+samplegasside %>% select(-measurement_info) %>%  write.csv( "rawdata.csv")
+```
+
+```{r group samples}
+samplegasside<- samplegasside%>% arrange(Analysis) %>% 
+  mutate(
+      new_sample =  Analysis != c("", head(Analysis, -1)),
+      batch = cumsum(new_sample)) 
+```
+
+```{r Analysisvs45o44 plot}
+Analysisvs45o44 <- samplegasside %>% 
+  ggplot(aes(x=batch, y=logr45o44)) + 
+  geom_boxplot()+
+  geom_point(aes(color=v44.mV, shape=`Identifier 1`))
+ggplotly(Analysisvs45o44)
+```
+##
+```{r v44mVvs45o44}
+v44.mVvs45o44 <- samplegasside %>% 
+  ggplot() + 
+  geom_point(aes(x=v44.mV, y=r45o44, color= file_datetime))
+ggplotly(v44.mVvs45o44)
+```
+```{r 47}
+v44.mVvs47o44 <- samplegasside %>% filter(`Identifier 1`=="Yellowstone") %>% 
+  ggplot(aes(x=v44.mV, y=r47o44, shape=Analysis, color=file_datetime)) + 
+  geom_point()+
+  stat_smooth(method = "gam", formula = y ~ s(x, k = 3), size = 1)
+  #stat_smooth(method = "lm", formula = y ~ x + I(x^2), size = 1,color="red")
+ggplotly(v44.mVvs47o44)
+```
+
+
+
+```{r 47 group}
+v44.mVvs47o44groupof5 <- samplegasside %>% filter(`Identifier 1`=="Yellowstone") %>% 
+  ggplot(aes(x=v44.mV, y=r47o44, shape=as.character(batch), color=file_datetime)) + 
+  #geom_point()+
+  stat_smooth(method = "gam", formula = y ~ s(x, k = 3), size = 1)
+  #stat_smooth(method = "lm", formula = y ~ x + I(x^2), size = 1,color="red")
+ggplotly(v44.mVvs47o44groupof5)
+```
+```{r}
+samplegasside %>% select( -measurement_info) %>%  write.csv("samplegasside.csv")
+
+```
+
+```{r, this can't be right}
+
+JohnsonandPoissonNoise <- function(mV,R, integrationTime){
+  kB = 1.38064852*10^-23 #Boltzman's constant
+  T = 290 # Kelvin
+  R = 1E11  # resistor size
+  amplifierNoiseVariance = 4*kB*T*R  #Johnson-Nyquist noise
+
+  cpsPerVolt = 6.24150934*10^18/R  # elementary charge, Ohm's Law
+  
+  noiseVariance= ((mV*1000)/cpsPerVolt + amplifierNoiseVariance) / integrationTime 
+  noiseVariance
+}
+```
+
+kB = 1.38064852*10^-23 #Boltzman's constant
+T = 290 # Kelvin
+R = 1E11  # resistor size
+amplifierNoiseVariance = 4*kB*T*R  #Johnson-Nyquist noise
+
+cpsPerVolt = 6.24150934*10^18/R;  % elementary charge, Ohm's Law
+
+```{r mixing resistor in this mutate call}
+samplegasside<- samplegasside %>%  
+    mutate(
+            simDNoisy_v44.mV = JohnsonandPoissonNoise(v44.mV, 10^8,5),
+            simDNoisy_v45.mV = JohnsonandPoissonNoise(v45.mV, 10^10,5),
+            simDNoisy_v46.mV = JohnsonandPoissonNoise(v46.mV, 10^11,5),
+            simDNoisy_v47.mV = JohnsonandPoissonNoise(v47.mV, 10^13,5),
+            simDNoisy_v48.mV = JohnsonandPoissonNoise(v48.mV, 10^13,5),
+            simDNoisy_v49.mV = JohnsonandPoissonNoise(abs(v49.mV), 10^13,5))
+
+getPred <- function(parS, xx) parS$a * exp(xx * parS$b) + parS$c 
+## residual function 
+residFun <- function(p, observed, xx) observed - getPred(p,xx)
+## starting par
+parStart <- list(a=3,b=-.01, c=-35)
+
+
+tictoc::tic()
+r45o44_fit <- nls.lm(par=parStart, fn = residFun, observed = samplegasside$simDNoisy_v45.mV, xx = samplegasside$r45o44, control = nls.lm.control(nprint=0, maxiter = 150))
+r46o44_fit <- nls.lm(par=parStart, fn = residFun, observed = samplegasside$simDNoisy_v46.mV, xx = samplegasside$r46o44, control = nls.lm.control(nprint=0, maxiter = 150))
+tictoc::toc()
+
+```
+
+```{r}
+# 
+samplegasside_long_ratios <- samplegasside %>% 
+  gather(key = "ratio_name", value = "ratio_value", matches("^r\\d{2}o\\d{2}"))
+samplegasside_long_ratios_log <- samplegasside %>% 
+  gather(key = "ratio_name", value = "ratio_value", matches("^logr\\d{2}o\\d{2}"))
+
+# available standards data
+standards <- filter(samplegasside_long_ratios, `Identifier 1` == "Yellowstone")
+standardslog <- filter(samplegasside_long_ratios_log, `Identifier 1` == "Yellowstone")
+
+# prepare sample data frame
+find_std_analyses_by_time_range <- function(sample_data, std_data, time_range) {
+  date_range <- range(sample_data$file_datetime)
+  date_range <- c(date_range[1] - time_range, date_range[2] + time_range)
+  dplyr::filter(std_data, dplyr::between(file_datetime, !!date_range[1], !!date_range[2])) %>% 
+    dplyr::pull(Analysis) %>% unique()
+}
+pull_std_data_by_analyses_and_ratio <- function(analyses, ratio_name, std_data) {
+  dplyr::filter(std_data, Analysis %in% !!analyses, ratio_name == !!ratio_name) %>% 
+    select(ratio_name, ratio_value, v44.mV)
+}
+samples <- samplegasside_long_ratios %>% 
+  nest(-Analysis, -ratio_name, .key = "sample_data") %>% 
+  # generate calibration data structure
+  mutate(
+    std_analyses = map(
+      .x = sample_data, 
+      .f = find_std_analyses_by_time_range, 
+      # constants
+      std_data = standards, 
+      time_range = lubridate::duration(1, "hours")),
+    std_data = map2(
+      .x = std_analyses,
+      .y = ratio_name,
+      .f = pull_std_data_by_analyses_and_ratio,
+      # constants
+      std_data = standards
+    )
+  ) %>% 
+  arrange(Analysis, ratio_name)
+stopifnot(all(map_int(samples$std_analyses, length) > 0))
+# generate fits
+generate_std_fit <- function(std_data) {
+  stats::glm(ratio_value ~ v44.mV, data = std_data)
+  #add exp here
+}
+
+apply_std_fit <- function(sample_data, std_fit) {
+  
+  std_fit_predict <- predict(std_fit, newdata = select(sample_data, v44.mV), se.fit = TRUE)
+  
+  mutate(sample_data,
+         std_ratio_value = std_fit_predict$fit,
+         std_ratio_se = std_fit_predict$se.fit
+  )
+}
+samples_with_fit <- 
+  samples %>% 
+  # apply calibration
+  mutate(
+    std_fit = map(
+      .x = std_data, 
+      .f = generate_std_fit
+    ),
+    fit_summary = map(std_fit, broom::glance),
+    sample_data = map2(
+      .x = sample_data,
+      .y = std_fit,
+      .f = apply_std_fit
+    ) 
+  )
+
+```
+```{r playing}
+unnestestedfit <- unnest(samples_with_fit, sample_data, fit_summary)
+unnestestedfit %>% ggplot()+
+  aes(x = v44.mV) +
+  geom_point( aes(x= `deviance`, y = null.deviance, color= file_datetime))
+unnestestedfit %>% ggplot()+
+  aes(x = v44.mV) +
+  geom_point( aes(x= `deviance`, y = BIC, color= file_datetime))    
+  
+  
+
+unnestestedfit %>% mutate(
+  dx= ratio_value/std_ratio_value
+) %>% select(dx,everything()) %>% filter(`Identifier 1`!="Yellowstone")
+
+write.csv(select(unnestestedfit, -measurement_info, -std_data, -std_fit, -std_analyses), "samples_with_fit.csv")
+```
+
+
+# ```{r}
+# # take a look
+# samples_with_fit %>% 
+#   ggplot() + 
+#   aes(x = v44.mV) +
+#   geom_point(
+#     data = function(df) unnest(df, sample_data) %>% mutate(panel = "sample_data"),
+#     mapping = aes(y = ratio_value, color = `Identifier 1`, shape = panel)
+#   ) +
+#   # geom_point(
+#   #   data = function(df) unnest(df, std_data) %>% mutate(panel = "standard data"),
+#   #   mapping = aes(y = ratio_value, shape = panel), 
+#   #   alpha = 0.5
+#   # ) +
+#   # error bar for pressure matched
+#   geom_errorbar(
+#     data = function(df) unnest(df, sample_data) %>% mutate(panel = "pressure matched standard estimate"),
+#     mapping = aes(ymin = std_ratio_value - std_ratio_se, ymax = std_ratio_value + std_ratio_se),
+#     width = 0
+#   ) +
+#   geom_point(
+#     data = function(df) unnest(df, sample_data) %>% mutate(panel = "pressure matched standard estimate"),
+#     mapping = aes(y = std_ratio_value, shape = panel)
+#   ) +
+#   facet_grid(ratio_name ~ panel, scales = "free")
+# ggplotly()
+# ```
+
+# ```{r}
+# samples_with_fit %>% unnest(sample_data) %>% filter(Analysis %in% c(34851)) %>% 
+#     ggplot(aes(x=std_ratio_value, y=v44.mV,color=`Identifier 1`))+
+#         geom_point()+
+#         facet_grid(ratio_name ~ `Identifier 1`, scales = "free")
+# ggplotly()
+# 
+# samples_with_fit %>% unnest(sample_data) %>% filter(Analysis %in% c(34851)) %>% filter(ratio_name =="r47o44") %>% 
+#     ggplot(aes(x=std_ratio_value, y=ratio_value,color=`v44.mV`))+
+#         geom_point()
+#         
+# 
+# samplegasside %>% filter(Analysis %in% c(34851)) %>% select("r47o44") %>% 
+#   summarise(mean(r47o44),
+#             sd(r47o44))
+# 
+# samples_with_fit %>% unnest(sample_data) %>% filter(Analysis %in% c(34851)) %>% filter(ratio_name =="r47o44") %>% 
+#   summarise(mean(std_ratio_value),
+#             sd(std_ratio_value),
+#             mean(ratio_value),
+#             sd(ratio_value)
+#             )
+# ```
+
+
+
+```{r}
+samplegasside_long_ratios_withfit <- samples_with_fit %>% unnest(sample_data) %>% 
+            filter(Analysis==34842 & cycle %in% c(1:150))  %>% group_by(cycle) %>% #& cycle %in% c(1,2,3,4,5,6,7,8)
+            spread(ratio_name,ratio_value,sep = "_") %>% summarise_all(funs(ifelse(is.numeric(.),mean(.,na.rm=T),.)))
+samplegasside_long_ratios_withfit
+
+flatlistdata.fit <- samplegasside_long_ratios_withfit %>% mutate( Donotuse="",
+                                              runinfo="") %>% clumpedbyCyc_withfit
+
+
+D47 <- flatlistdata.fit %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=d47, y=D47full))
+D47v44mV <- flatlistdata.fit %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=v44.mV, y=D47full))
+subplot(D47,D47v44mV)
+
+```
+
+```{r normal vs fit d18O d13C}
+flatlistbycyc <- clumpedbyCyc(rawdata)
+
+
+d18Od13Cfit <- flatlistdata.fit %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=d18O, y=d13C))
+d18Od13Cnormal <- flatlistbycyc %>% filter(Analysis>34842 &Analysis<34843 ) %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=d18O, y=d13C))
+subplot(d18Od13Cfit,d18Od13Cnormal)
+
+```
+
+```{r normal vs fit clumped}
+
+D47fit <- flatlistdata.fit %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=d47, y=D47full))
+D47normal <- flatlistbycyc %>% filter(Analysis>34842 &Analysis<34843 ) %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=d47, y=D47full))
+subplot(D47fit,D47normal)
+
+
+flatlistbycyc %>% filter(Analysis>34842 &Analysis<34843 ) %>% select(d47)
+flatlistdata.fit %>% select(d47,ratio_name_r47o44,std_ratio_value)
+```
+
+
+
+```{r}
+library(dplyr)
+df <- data.frame(x = c(NA, "a.b", "a.d", "b.c"))
+df %>% separate(x, c("A", "B"))
+
+# If you just want the second variable:
+df %>% separate(x, c(NA, "B"))
+```
+
+```{r}
+library(dplyr)
+stocks <- data.frame(
+  time = as.Date('2009-01-01') + 0:9,
+  X = rnorm(10, 0, 1),
+  Y = rnorm(10, 0, 2),
+  Z = rnorm(10, 0, 4)
+)
+stocksm <- stocks %>% gather(stock, price, -time)
+stocksm %>% spread(stock, price)
+stocksm %>% spread(time, price)
+```
+
+```{r}
+
+```
+
+
+```{r}
+##### example 2 
+
+## function to simulate data 
+f <- function(TT, tau, N0, a, f0) {
+    expr <- expression(N0*exp(-TT/tau)*(1 + a*cos(f0*TT)))
+    eval(expr)
+}
+
+## helper function for an analytical gradient 
+j <- function(TT, tau, N0, a, f0) {
+    expr <- expression(N0*exp(-TT/tau)*(1 + a*cos(f0*TT)))
+    c(eval(D(expr, "tau")), eval(D(expr, "N0" )),
+      eval(D(expr, "a"  )), eval(D(expr, "f0" )))
+}
+
+## values over which to simulate data 
+#TT <- samplegasside %>% filter(Analysis== 34848) %>% select(v44.mV) 
+#TT <- TT$v44.mV
+TT <- seq(0, 8, length=501)
+
+## parameter values underlying simulated data  
+p <- c(tau = 2.2, N0 = 1000, a = 0.25, f0 = 8)
+
+## get data 
+Ndet <- do.call("f", c(list(TT = TT), as.list(p)))
+## with noise
+N <- Ndet +  rnorm(length(Ndet), mean=Ndet, sd=.01*max(Ndet))
+
+## plot the data to fit
+par(mfrow=c(2,1), mar = c(3,5,2,1))  
+plot(TT, N, bg = "black", cex = 0.5, main="data")
+
+## define a residual function 
+fcn     <- function(p, TT, N, fcall, jcall)
+    (N - do.call("fcall", c(list(TT = TT), as.list(p))))
+
+## define analytical expression for the gradient 
+fcn.jac <- function(p, TT, N, fcall, jcall) 
+    -do.call("jcall", c(list(TT = TT), as.list(p)))
+
+## starting values 
+guess <- c(tau = 2.2, N0 = 1500, a = 0.25, f0 = 10)
+
+## to use an analytical expression for the gradient found in fcn.jac
+## uncomment jac = fcn.jac
+out <- nls.lm(par = guess, fn = fcn, jac = fcn.jac,
+              fcall = f, jcall = j,
+              TT = TT, N = N, control = nls.lm.control(nprint=1))
+
+## get the fitted values 
+N1 <- do.call("f", c(list(TT = TT), out$par))   
+
+## add a blue line representing the fitting values to the plot of data 
+lines(TT, N1, col="blue", lwd=2)
+
+## add a plot of the log residual sum of squares as it is made to
+## decrease each iteration; note that the RSS at the starting parameter
+## values is also stored
+plot(1:(out$niter+1), log(out$rsstrace), type="b",
+main="log residual sum of squares vs. iteration number",
+xlab="iteration", ylab="log residual sum of squares", pch=21,bg=2) 
+
+## get information regarding standard errors
+summary(out) 
+
+```
+
+

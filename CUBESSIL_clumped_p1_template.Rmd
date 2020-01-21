@@ -1,0 +1,1093 @@
+---
+title: "2020 BJDK"
+author: "Brett"
+date: "Jan 2020"
+output: html_document
+---
+
+Code version: updated June 28,2019: "CUBESSIL_clumped_p1_template"
+
+MANUALLY UPDATE: user defined, session-specific information
+```{r manual-definitions}
+User <- "Brett"
+session <-"Jan 2020"  #change this to whatever name or number you want to give you session, is appended on to plot titles and spreadsheet output so that everything is session specific, including file names
+MS.ID<-"Bert"   #don't change this unless we get a new mass spec or you are using this for data from another lab :)   
+
+```
+
+## Install custom packages
+These will change frequently over the next couple of years, so it is wise to reinstall them everytime, to be sure you are using the up-to-date versions of the functions that the code below needs. If there haven't been any changes to the codes, it will say that and not reinstall them.
+```{r install, eval = FALSE}
+#devtools::install_github("KopfLab/isoreader")
+
+#devtools::install_github("cubessil/isoprocessCUBES") #general CUBESsil lab stuff
+
+#devtools::install_github("cubessil/CUBESSILclumpedmath") #only for processing clumped data
+
+#devtools::install_github("cubessil/clumpsDRcodes") #only for processing clumped data
+
+```
+
+## Load libraries and clumped isotope standard values
+
+```{r message = FALSE, warning = FALSE}
+library(rlang)
+library(plotly)
+library(isoreader)
+library(tidyverse)
+library(isoprocessCUBES)
+library(CUBESSILclumpedmath)
+
+Standards <- readRDS(url("https://github.com/cubessil/clumpsDRcodes/blob/master/Standards_042019.RDS?raw=true"))
+#ProjectIDs <- read.csv("ProjectIDs.csv")  IMPLEMENT - lets start a data file of sample IDs and Project IDS, so we can leave this out of the functions, but have a good cross platform, can store as RDS and read it in from github as well....
+```
+
+## Load all did files in a folder (or multiple folders)
+
+Catches any errors and exceptions that might occur and reports them as "problems".
+```{r load-data}
+readrawdata <- T
+if (readrawdata){
+folder <- file.path(".")
+  stopifnot(file.exists(folder))
+  tictoc::tic()
+  did_files <- iso_read_dual_inlet(folder,cache = TRUE, quiet = FALSE, read_vendor_data_table = TRUE, parallel = TRUE)
+  tictoc::toc()
+  did_files <- iso_filter_files_with_problems(did_files)  
+  saveRDS(did_files, paste0(session, "_did_files.RDS"))
+}else{
+  did_files <- readRDS(paste0(session, "_did_files.RDS"))
+}
+
+  rawdata <- did_files %>% iso_get_raw_data(include_file_info = c(Analysis, file_datetime, Preparation, `Identifier 1`, `Identifier 2`, MS_integration_time.s, Method, measurement_info))
+  
+```
+#clump math
+```{r clumped-math-cycles}
+  flatlist.Cyc <- clumpedbyCyc(rawdata)
+  #flatlist.Cyc.017 <- clumpedbyCyc(rawdata, lambda = 0.528) #for illustration purposes only
+
+flatlist.Cyc <- flatlist.Cyc %>%   ##calculating outliers to be able to plot at the cycle level. i redo this math at the acq level later 
+  group_by(batch) %>%  
+  mutate(D47full.stdev = sd(D47full), D47full.mean =mean(D47full),
+              D47.outlier.1sig = abs(D47full.mean-D47full)>abs(D47full.stdev*1), 
+              D47.outlier.2sig = abs(D47full.mean-D47full)>abs(D47full.stdev*2),
+              D47.outlier.3sig = abs(D47full.mean-D47full)>abs(D47full.stdev*3),
+              D47.outlier.6sig = abs(D47full.mean-D47full)>abs(D47full.stdev*6),
+              nooutlier = FALSE) %>% 
+  mutate(d18O.stddev = sd(d18O), d18Omean = mean(d18O),
+              d18O.outlier.1sig = abs(d18Omean-d18O)>abs(d18O.stddev*1), 
+              d18O.outlier.2sig = abs(d18Omean-d18O)>abs(d18O.stddev*2), 
+              d18O.outlier.3sig = abs(d18Omean-d18O)>abs(d18O.stddev*3),
+              d18O.outlier.6sig = abs(d18Omean-d18O)>abs(d18O.stddev*6)
+         ) %>% 
+  mutate(d13C.stddev = sd(d13C), d13Cmean = mean(d13C),
+              d13C.outlier.1sig = abs(d13Cmean-d13C)>abs(d13C.stddev*1), 
+              d13C.outlier.2sig = abs(d13Cmean-d13C)>abs(d13C.stddev*2), 
+              d13C.outlier.3sig = abs(d13Cmean-d13C)>abs(d13C.stddev*3),
+              d13C.outlier.6sig = abs(d13Cmean-d13C)>abs(d13C.stddev*6))
+
+
+#this plots batch versus id, and is colored by Identifier 1. This is a visual way to assess if all the samples were correctly batch. Watch samples with an abnormal number of cycles (ie, id number) and different colors, which suggests that samples didn't get binned correctly or there are 2 samples with the same name in a row that are being counted as a single sample (e.g. running 2 of the same heated gas or standard in a row)
+saveRDS(flatlist.Cyc,"flatlist.Cyc")
+batching <- flatlist.Cyc %>%
+  ggplot(aes(x=batch, y=id, fill = `Identifier 1`)) +
+  geom_point(size = 3, shape = 21) +
+  theme_bw()
+
+ggplotly(batching)
+
+unique(flatlist.Cyc$`Identifier 1`) 
+
+#filter(flatlist.Cyc, Analysis > 30098 & Analysis <30125)
+#shows all unique sample ID names, so easy to see if there are inconsistencies that need to be fixed in the next box
+```
+
+#change names, add comments, and Donotuse
+```{r  fix-label-mistakes}
+#Code examples:
+#flatlist.Cyc[  flatlist.Cyc$Analysis > 28131 & flatlist.Cyc$Analysis < 28139.8, "Identifier 1"] <- "all$dR_1000"
+#flatlist.Cyc[ flatlist.Cyc$`Identifier 1` == "KB_CI_576; EBOC" , "Identifier 1"] <- "eBOC_1000"
+#flatlist.Cyc <- getmetadatafromAnalysis(flatlist.Cyc, 28207, 28215.7, 28198) #Can use this function to shift the metadata from one set of analysis numbers to another set; useful for occasions like carousel glitches or starting the sequence on the wrong line that result in the wrong sample information for a given sample
+
+
+#pulled from May and June, name fixes from katie -> May 2019
+#flatlist.Cyc[  flatlist.Cyc$Analysis > 29557 & flatlist.Cyc$Analysis < 29565.8, "Identifier 1"] <- "all$CU YULE"
+
+#flatlist.Cyc <- flatlist.Cyc %>% getmetadatafromAnalysis(30999,31007.8,30990) %>% 
+#                                 getmetadatafromAnalysis(30990,30998.8,30981) %>% 
+#                                 getmetadatafromAnalysis(30981,30989.8,30972) %>% 
+#                                 getmetadatafromAnalysis(30972,30980.8,30963)
+
+## 07/18/2019.... poweroutage at 7:34AM. ACF$Af-NCF-TS2-21.5Bspar-gen2 2.769 shouldbe fine, but lost 6 samples after that do to carousel glitches
+
+#flatlist.Cyc <- flatlist.Cyc %>%
+ #change.donotuse.and.comment(30963,30971.8,FALSE,"This sample was missing from the seq and needing the next samples to be pushed down") %>%
+ #change.donotuse.and.comment(31127,31135.8,TRUE,"This EHT1 is a outlier, we don't know why") %>%
+ #change.donotuse.and.comment(31181,31189.8,TRUE,"This EHT2 is a outlier, we don't know why")
+
+## filtering out all NOT "all" and "ACF"
+#   
+#flatlist.Cyc <- flatlist.Cyc %>% filter(sub("\\$.*","", sub("//$.*", "", `Identifier 1`))=="all" | sub("\\$.*","", sub("//$.*", "", `Identifier 1`))=="KubaPiceance")
+
+#flatlist.Cyc <- flatlist.Cyc %>% filter(Analysis > 29822) ## trying date cut off to include 190528 but nothing older(>29822)  #Anne's July run starts at Analysis 31489      31052
+
+##NOTE: Marina Suerez and Dusin Harper from KU ran between 07/08/2019-07/13/2019, then i jumped back on the 253. Reference frame looks contintously stable so keeping ref frame. 
+
+##NOTE: Brett started runing on 07/29/2019 is using Annes code as a jump off point
+```
+
+#Add more outlier test
+```{r}
+flatlist.Cyc <- flatlist.Cyc %>%   ##prep dataframe, could be function but users should be able to make new outlier col
+  group_by(batch) %>%  
+  mutate(D47full.stdev = sd(D47full), D47full.mean =mean(D47full),
+              D47.outlier.1sig = abs(D47full.mean-D47full)>abs(D47full.stdev*1), 
+              D47.outlier.2sig = abs(D47full.mean-D47full)>abs(D47full.stdev*2),
+              D47.outlier.3sig = abs(D47full.mean-D47full)>abs(D47full.stdev*3),
+              nooutlier = FALSE)
+
+```
+
+#Yield Plots and signal
+Goal in these plots it to find samples or gases with too little gas that should not be used. 1st plot shows all cycles for all acquisitions. Yield values after the first acquistion are equivalent to the percent bellows compression. If there is enough gas, "yield" should increase after the first acquisition, and then should consistently drop after each acquisition. The lower plot shows just the first acquisition. The second plot shows mass versus yield; samples that have <100% carbonate or have a yield issue (ie, not complete reaction) will fall off the main line. Everything a zero is a reference gas. The last plot is mass 44 versus analysis. Samples that do not have enough sample to run will eventually stop making it to 12.5 volts.
+```{r yield, fig.width = 20}
+
+pYield.all <- flatlist.Cyc %>%
+  ggplot(aes(x=Analysis, y=Yield, fill = `Preparation`)) +
+  geom_point(shape = 21)
+
+pYield.firstacq <- flatlist.Cyc %>%
+  filter(Method == "Start and Transfer.met") %>%
+  ggplot(aes(x=Analysis, y=Yield, fill = `Preparation`, label = `Identifier 1`)) +
+  geom_point(shape = 21)
+
+pYieldVmass <- flatlist.Cyc %>%
+  filter(Method == "Start and Transfer.met" & 'Identifier 2' != 0) %>%
+  ggplot(aes(x=as.numeric(`Identifier 2`), label = `Identifier 1`, y=Yield, fill = `Preparation`, label = `Analysis`)) +
+  geom_point(shape = 21)
+
+pM44mv <- flatlist.Cyc %>% 
+  ggplot(aes(x=Analysis, y=v44.mV, fill=`Preparation`, label=`Identifier 1`)) + 
+  geom_point(shape = 21)
+  
+
+subplot(pYield.all, pYield.firstacq, nrows = 2)
+ggplotly(pYieldVmass)
+ggplotly(pM44mv)
+```
+
+#add comments and Donotuse
+```{r label-remove-yield-problems}
+#Example code:
+# flatlist.Cyc <- flatlist.Cyc %>% 
+#   change.donotuse.and.runinfo(27150,27820,TRUE,"omg BRettt") 
+
+#note that when using Analysis numbers from the flatlist.Cyc dataframe, the analyses include .1 to .7 at the end of each number. So, you need to account for that when defining the ranges. The function is set to read <= and >= for the upper and lower bounds, respectively.
+
+# flatlist.Cyc <- flatlist.Cyc %>%
+#   change.donotuse.and.runinfo(31392,31396,TRUE,"less then 12.5V") %>%  #dR_1000
+#   change.donotuse.and.runinfo(31612,31621,FALSE,"stir stick maybe thrown. monitor against further replicates") %>% #ACF$AF-NCF-TS2-16-03
+#   change.donotuse.and.runinfo(31621,31630,FALSE,"stir stick maybe thrown. monitor against further replicates") %>% #ACF$AF-NCF-TS2-16-12
+#   change.donotuse.and.runinfo(31630,31638,FALSE,"stir stick maybe thrown. monitor against further replicates") %>% #all$ETH1
+#   change.donotuse.and.runinfo(31639,31648,FALSE,"stir stick maybe thrown. monitor against further replicates") %>% #ACF$AF-NCF-TS2-16-14
+#   change.donotuse.and.runinfo(31648,31657,FALSE,"stir stick maybe thrown. monitor against further replicates") %>% #ACF$AF-NCF-TS2-16-22
+#   change.donotuse.and.runinfo(31708.1,31708.4,TRUE,"zero was cut short") %>% #zero was cut short
+#   change.donotuse.and.runinfo(31827.1,31836, TRUE, "not enough and sequence error, no gas dropped so this sample just ran previous sample's gas") %>% 
+#   change.donotuse.and.runinfo(31827.1, 31836, TRUE, "low yield, less than 12.5V") %>% 
+#   change.donotuse.and.runinfo(31908.1, 31917, TRUE, "low yield, less than 12.5V") %>% 
+#   change.donotuse.and.runinfo(29625.1,29633.7,TRUE,"offset from the rest of population of dR_25, keep eye on")%>%
+#   change.donotuse.and.runinfo(32136.1,32136.7,TRUE,"low yield") %>% 
+#   change.donotuse.and.runinfo(32853, 32862, TRUE, "low yield, weigh out more next time") %>%  #ACF$AF-NCF-TS2-16-10 4.226mg 07/16/2019
+#   change.donotuse.and.runinfo(33244, 33253, TRUE, "low yield, stir stick issue") %>% #all$ETH3 8.132mg 07/21/2019, stir stick blown
+#   change.donotuse.and.runinfo(33253, 33262, TRUE, "low yield, stir stick issue") %>% #ACF$AF-NCF-TS3-16-01 6.016mg 07/21/2019, stir stick blown
+#   change.donotuse.and.runinfo(33306, 33315, TRUE, "low yield, come gas pumped away bc of compressed air issue w/ valve8") %>% #ACF$AF-NCF-TS3-16-15 8.123mg 07/22/2019
+#   change.donotuse.and.runinfo(33315, 33324, FALSE, "cryocooler off, watch for d18O issues") %>% #ACF$AF-NCF-TS3-16-01 7.629mg 07/22/2019, cryocooler off
+#   change.donotuse.and.runinfo(33324, 33333, TRUE, "cryocooler off, watch for d18O issues") %>% #all$ETH1 4.916mg 07/22/2019, cryocooler off
+#   change.donotuse.and.runinfo(33333, 33342, TRUE, "cryocooler off, watch for d18O issues") %>%  #ACF$AF-NCF-TS3-16-15 6.972 07/22/2019, cryocooler off. cryowarmed too much for next sample to run.
+#   change.donotuse.and.runinfo(33370,33379, TRUE, "not enough gas, less than 12.5mV") %>% #AF-NCF-TS3-16-01 5.282mg 07/24/2019
+#   change.donotuse.and.runinfo(33406,33415, TRUE, "not enough gas, less than 12.5 mV")
+  
+
+  
+  #change.donotuse.and.runinfo(31917.1,31926, TRUE, "bulk isotopes differ greatly from other replicates")
+```
+
+look at bulk isotopes - look for major fliers or samples with large variability
+```{r bulkisos-big}
+pd18O <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=Analysis, y=d18O, fill=`Preparation`, label = `Identifier 1`)) + geom_point()
+  
+pd13C <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=Analysis, y=d13C, fill=`Preparation`, label = `Identifier 1`)) +
+  geom_point()
+  
+subplot(pd18O,pd13C,nrows = 2) 
+```
+
+look at plots of all cycles for individual samples versus analysis number for d13C, d18O, d13C V d18O, and D47 versus analysis number. Looking for outlier cycles or acquisition, acquisitions with high variability relative to others in the sample, and other analytical problems (e.g. correlation between d13C and d18O, strong trends in values at the cycle and/or acquisition level)
+```{r cyc-samples-bulkisos, fig.height= 20, fig.width=30}
+
+d18O.mean <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  calc_means("d18O", "batch", "Identifier 1")
+
+p.ind.d18O <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_hline(
+    data = d18O.mean,
+    mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+  geom_point(aes(x=Analysis, y=d18O, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+
+d13C.mean <- 
+  flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  calc_means("d13C", "batch", "Identifier 1")
+
+p.ind.d13C <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_hline(
+    data = d13C.mean,
+    mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+  geom_point(aes(x=Analysis, y=d13C, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+
+p.ind.d13Cvd18O <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=d18O, y=d13C, fill=`Identifier 1`)) + 
+  geom_point(aes(shape = , shape = D47.outlier.2sig)) +
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw()
+
+D47.mean <- 
+  flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  calc_means("D47full", "batch", "Identifier 1")
+
+p.ind.D47 <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_hline(
+    data = D47.mean,
+    mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+  geom_point(aes(x=Analysis, y=D47full, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+
+p.ind.d18O
+p.ind.d13C
+p.ind.d13Cvd18O
+p.ind.D47
+
+# p.ind.D47.single <- flatlist.Cyc %>%
+#   filter(Donotuse != TRUE) %>%
+#   filter(batch==237) %>% #change batch number to look at single plot
+#   ggplot() +
+#   #geom_hline(
+#   #  data = D47.mean,
+#   #  mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+#   geom_point(aes(x=Analysis, y=D47full, fill = `Identifier 1`, shape = D47.outlier.2sig), label = `Identifier 1`) +
+#   scale_linetype_manual(values = c(1, 3, 2, 3, 2)) +
+#   scale_shape_manual(values = c(21,24)) +
+#   #facet_wrap(.~batch, scales = "free") +
+#   theme_bw() 
+#   #guides(linetype = "none")
+# p.ind.D47.single
+#  ggplotly(p.ind.D47.single)
+```
+```{r selecting for batches}
+#selecting for certain window of batches so plots can be bigger.
+bigbatch <- 10
+smallbatch <- 1
+d18O.mean.select <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  filter(batch>smallbatch & batch<bigbatch) %>% 
+  calc_means("d18O", "batch", "Identifier 1")
+
+p.ind.d18O.select <- flatlist.Cyc %>% 
+  filter(batch>smallbatch & batch<bigbatch) %>% 
+  ggplot() + 
+  geom_hline(
+    data = d18O.mean.select,
+    mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+  geom_point(aes(x=Analysis, y=d18O, fill = `Identifier 1`, shape = d18O.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+p.ind.d18O.select
+
+#selecting for just before andafter the poropak Q change 07/22/2019 (before= 400 to 424, after= 425-450)
+d18O.mean.Poropak <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  filter(batch>smallbatch & batch<bigbatch) %>% 
+  calc_means("d18O", "batch", "Identifier 1")
+
+p.ind.d18O.Poropak <- flatlist.Cyc %>% 
+  filter(batch>smallbatch & batch<bigbatch) %>% 
+  ggplot() + 
+  geom_hline(
+    data = d18O.mean.Poropak,
+    mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+  geom_point(aes(x=Analysis, y=d18O, fill = `Identifier 1`, shape = d18O.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+p.ind.d18O.Poropak
+```
+
+ID analysis number that correspond to problematic batch numbers, to make the donotuse labelling process easier
+```{r ID-analysis-batch}
+#95: dR_1000: first few cucles fall outside of 1sgima in d18O (positive, by max 0.04)
+#238: dR_1000. not enough gas, too few cycles for complete sample . looking at ind plots, looks like there is a weak linear relationship in both d13C and d18O overtime 
+#242: Cu YULE. first few cycles fall outside of the 1sigma in d18O (positive, by max .08). 
+#251: dR_25. first few cycles fall outside of the 1sigma in d18O (positive, by max .04) 
+#269: zero. cut short zero
+#272: three outliers at the beginning of run all out of 2sigma. little noisy, but going to keep in data for now
+#290: 4 outliers
+#290: first three cycles are outliers in d18O compared to the rest of the pop
+#308: gap in analysis number
+#372: ETH1. outliers in first Acq in d18O
+#373: AF-NCF-TS2-16-21.5Bspar-gen2. outliers in d18O also
+#382: first few cycles in d18O are outliers but fall into place with the average by the 7th cycle .... AF-NCF-TS-17-ElyLS
+#384: first few cycles in d18O are outliers but fall into place with the average by the 7th cycle .... ETH2, 32862.1 to 32870.7
+#385: same tail behavior at 384, by 6 cycles d18O comes back into line with average ... AF-NCF-TS2-16-28, 32871.1 to 32879.7
+#393: first few cycles in d18O are outliers but fall into place with average by 7th cycle ... AF-NCF-TS2-16-10
+#387
+#393
+#400
+#404
+#405
+#408
+#410
+#411
+#412
+#413
+#418
+#419
+#420
+#430
+#434: AF-NCF-TS3-16-19. not enough gas, couldn't get to 12.5mV
+
+#cull first Acq by batch # based on visual inspection
+cullthesebatches <- c(418, 419, 420, 430)
+
+
+```
+
+```{r Plotting individual batch} 
+#use to plot individual batch to be able to look more carefully for potential issues. 
+#batchcheck <- "###" add to plot: filter(batch == batchcheck) %>% 
+checkthisbatch <- flatlist.Cyc %>% filter(batch == "1") #CHANGE THIS NUMBER FOR WHICH BATCH YOU WANT TO CHECK INDIVIDUALLY. THIS PLOTS ALL RESPOND TO THIS VARIABLE.
+
+
+p.ind.d18O.single <- checkthisbatch %>% 
+  #filter(Donotuse != TRUE) %>%
+  ggplot() +
+  geom_point(aes(x=Analysis, y=d18O, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) +
+  scale_shape_manual(values = c(21,24)) +
+  ggtitle(checkthisbatch$batch) +
+  theme_bw()
+ggplotly(p.ind.d18O.single)
+
+p.ind.d13C.single <- checkthisbatch %>%
+  #filter(Donotuse != TRUE) %>%
+  ggplot() +
+  geom_point(aes(x=Analysis, y=d13C, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) +
+  scale_shape_manual(values = c(21,24)) +
+  ggtitle(checkthisbatch$batch) +
+  theme_bw()
+ggplotly(p.ind.d13C.single)
+
+p.ind.d13Cvd18O.single <- checkthisbatch %>%
+ #filter(Donotuse != TRUE) %>%
+  ggplot() +
+  geom_point(aes(x=d18O, y=d13C, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) +
+  scale_shape_manual(values = c(21,24)) +
+  ggtitle(checkthisbatch$batch) +
+  theme_bw()
+ggplotly(p.ind.d13Cvd18O.single)
+
+p.ind.D47.single <- checkthisbatch %>%
+  #filter(Donotuse != TRUE) %>%
+  ggplot() +
+  geom_point(aes(x=Analysis, y=D47full, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) +
+  scale_shape_manual(values = c(21,24)) +
+  ggtitle(checkthisbatch$batch) +
+  theme_bw()
+ggplotly(p.ind.D47.single)
+
+multiplot(p.ind.d18O.single, p.ind.d13C.single, p.ind.d13Cvd18O.single, p.ind.D47.single, cols=2)
+```
+
+Plotting d18O and d13C by ID 
+```{r bulk-crossplot-eachID 1, fig.height= 20, fig.width=20}
+ #ggplotly
+(flatlist.Cyc %>%
+  filter(Donotuse != TRUE) %>% 
+  ggplot(aes(x=d18O, y=d13C, color=file_datetime, label = Analysis)) + 
+  geom_point()+
+  facet_wrap(~ `Identifier 1` , scales = "free") +
+  theme_bw()
+ )
+```
+
+Plotting D47 by ID by time
+```{r by time, bulk-crossplot-eachID 1, fig.height= 20, fig.width=20}
+ # flatlist.Cyc %>%
+ #  filter(Donotuse != TRUE) %>% 
+ #  ggplot(aes(x=file_datetime, y=D47full, label = Analysis)) + 
+ #  geom_point()+
+ #  facet_wrap(~ `Identifier 1` , scales = "free") +
+ #  theme_bw() +
+ #  geom_smooth(method=lm)
+```
+
+Plotting D47 and d47 by ID
+```{r d47-D47-eachID 1, fig.height= 20, fig.width=20}
+# d47.mean <- 
+#   flatlist.Cyc %>% 
+#   filter(Donotuse != TRUE) %>%
+#   calc_means("d47", "batch", "Identifier 1")
+# 
+# mean.47 <- full_join(d47.mean, D47.mean, "batch")
+
+ggplotly(
+flatlist.Cyc %>%
+  filter(Donotuse != TRUE & `Identifier 1`=="all$eSSB_1000") %>% 
+  group_by("batch") %>%
+  ggplot(aes(x=d47, y=D47full, color=Preparation, label=Analysis)) + 
+  geom_point()+
+  #geom_point(aes(x=mean(d47), y=mean(D47full)), size=6, shape = 21) +
+  facet_wrap(~ `Identifier 1` , scales = "free")+
+  theme_bw()
+)
+```
+
+
+#add more comments and Donotuse, based on analytical issues and major outliers
+```{r label-remove-analytical-problems}
+#Example code:
+# flatlist.Cyc <- flatlist.Cyc %>% 
+#   change.donotuse.and.runinfo(28065.1,28065.3,TRUE,"not enough gas to run")
+
+flatlist.Cyc <- flatlist.Cyc %>% 
+    change.donotuse.and.runinfo(29625.1, 29633.7,TRUE,"offset from the rest of population of dR_25, keep eye on") %>% #maybe throw out if later in clumped processing this sample varies in D47 space greatly
+    change.donotuse.and.runinfo(30963.1, 30972,TRUE,"bulk isotopes offset from the rest of population of ETH1") %>% 
+    change.donotuse.and.runinfo(31181.1, 31190.1,TRUE,"bulk isotopes offset from the rest of population of ETH2") %>% 
+    change.donotuse.and.runinfo(31392.1, 31397.1, TRUE, "sample too small") %>% 
+    change.donotuse.and.runinfo(31585.1, 31594.1, FALSE, "sample sat in trap 2 for ~60 mins bc of a FromPy read error between computers, keep an eye one")  %>% 
+        #looking at the D47vsd47 plot, it appears to fall on top of all the other dR_25 and is not labelled at D48excess... I'd keep for now
+    change.donotuse.and.runinfo(31127.1, 31136.1, TRUE, "bulk isotopes offset from the rest of population of ETH1") %>% 
+    change.donotuse.and.runinfo(29378.1, 29383, TRUE, "bulk isotopes offset from rest of populations of ETH2") %>% 
+    change.donotuse.and.runinfo(30341.1, 30362, TRUE, "unexplained long strain fo dR_25 and then 5 eSSB_25") %>%  #dR_25 odd 
+    change.donotuse.and.runinfo(29255.1, 29264, TRUE, "dR_25 offset from rest of pop in bulk iso") %>% 
+    change.donotuse.and.runinfo(31809.1, 31818, FALSE,"ETH2 offset from rest of population. keep eye one") %>% 
+#after looking at standard residuals for ETHs and identifying outliers that I am a fence about culling
+    change.donotuse.and.runinfo(29369.1,29378, TRUE, "ETH1 outlier from rest of population") %>% #i think keep
+    change.donotuse.and.runinfo(31809.1,31818, TRUE, "ETH2 outlier from rest of population") %>% #i think cull
+    change.donotuse.and.runinfo(30895.1,30904, FALSE, "ETH3 high positive outlier from rest of population") %>% #batch 127. i think keep
+    change.donotuse.and.runinfo(30250.1,30259, FALSE, "ETH3 high positive outlier from rest of population") %>% #batch 81. i think keep
+    change.donotuse.and.runinfo(29351.1,29360, TRUE, "ETH3 negative outlier from rest of population") %>%  #from 20150520. batch 28. i think cull
+    change.donotuse.and.runinfo(29652.1,29661, TRUE, "ETH3 negative outlier from rest of population") %>%  #from 20190524. batch 50. i think cull
+  
+    change.donotuse.and.runinfo(32745.1,32753.7, TRUE, "ETH3 very positive compared to rest of population" ) %>% #from 20190715. i think cull
+    change.donotuse.and.runinfo(32754.1, 32762.7, TRUE, "offest from rest of pop of ETh1 by a lot") %>% 
+    change.donotuse.and.runinfo(32853.1, 32861.7, TRUE, "maybe not enough gas? only 10.8 but ran ") %>%  
+    change.donotuse.and.runinfo(32862.1, 32870.7, FALSE, "first d18O cycles are off from average. want to wait to see if this rep falls away from rest of pop") %>%  #ETH2 7.725
+    change.donotuse.and.runinfo(32871.1, 32879.7, FALSE, "first d18O cycles are off from average. want to wait to see if this rep falls away from rest of pop") %>%  #AF-NCF-TS2-16-28 %>% 
+    change.donotuse.and.runinfo(33213.1, 33213.9, TRUE, "test of computer communication") %>% 
+    change.donotuse.and.runinfo(33214.1, 33214.9, TRUE, "test of computer communication") %>% 
+    change.donotuse.and.runinfo(30678,30686, TRUE, "falls out of cluster in both D47 and d47 space") %>% 
+    change.donotuse.and.runinfo(33370.1,33378.9, TRUE, "not enough gas") %>% 
+  ## Brett addeding
+    change.donotuse.and.runinfo(33226,33234.9, TRUE, "way off")
+
+## note: eventually i need to look at the standard residuals and decide what time window of samples from May and June I want to keep and use for the dataframe for this data. Look at the standard residuals and decide when the carbonate standards and the gases match the closest, and when the stdres's are lowest overall. that's the machine time window to use. 
+
+justwanttosee <- flatlist.Cyc %>% group_by(batch) %>% filter(`Identifier 1` == "all$dR_25") %>% select(Analysis, Donotuse)
+```
+Plotting D47 and d47 by ID
+```{r d47-D47-eachID 2, fig.height= 20, fig.width=20}
+ggplotly(
+flatlist.Cyc %>%
+  filter(Donotuse != TRUE) %>% 
+  group_by("batch") %>%
+  ggplot(aes(x=d47, y=D47full, color=Preparation, label=Analysis)) + 
+  geom_point()+
+  #geom_point(aes(x=mean(d47), y=mean(D47full)), size=6, shape = 21) +
+  facet_wrap(~ `Identifier 1` , scales = "free")+
+  theme_bw()
+)
+```
+
+```{r outliers at cycle level}
+# improved line by line clumped that keeps cycle data and calculates Acq averages
+
+# flatlist.Acq.withCyc <- flatlist.Cyc %>%
+#     group_by(file_id) %>% add_tally() %>%
+#     mutate(
+#       d45.stdev.Aq= sd(d45),
+#       d45.Aq = mean(d45),
+#       d46.stdev.Aq= sd(d46),
+#       d46.Aq = mean(d46),
+#       d47.stdev.Aq= sd(d47),
+#       d47.Aq = mean(d47),
+#       d48.stdev.Aq = sd(d48),
+#       d48.Aq = mean(d48),
+#       d49.stdev.Aq = sd(d49),
+#       d49.Aq = mean(d49),
+#       D47.stdev.Aq = sd(D47full),
+#       D47full.Aq= mean(D47full),
+#       D48.stdev.Aq = sd(D48full),
+#       D48full.Aq= mean(D48full),
+#       D49.stdev.Aq = sd(D49full),
+#       D49full.Aq= mean(D49full),
+#       d13C.stdev.Aq= sd(d13C),
+#       d13C.Aq =  mean(d13C),
+#       d18O.stdev.Aq= sd(d18O),
+#       d18O.VPDB.min.Aq = ((((mean(d18O)-30.86)/1.03086)+1000)/1.00821)-1000,
+#       d18O.Aq = mean(d18O),
+#       d18O.ref.Aq = `ref d 18O/16O`[1],
+#       d13C.ref.Aq = `ref d 13C/12C`[1],
+#       PB.Aq= mean(PB),
+#       LeftPressure.Aq= mean(LeftPressure),
+#       RightPressure.Aq = mean(LeftPressure),
+#       numberofcyc = n
+#       ) %>%    
+#       ungroup %>% 
+#       mutate(
+#         new_sample =  Preparation != c("", head(Preparation, -1))  | `Identifier 1` != c("", head(`Identifier 1`,-1)),
+#         new_file =  file_id != c("", head(file_id, -1)),
+#         batch = cumsum(new_sample)) %>%
+#         group_by(batch) %>% 
+#         mutate(id = row_number(),
+#                Acqnum = cumsum(new_file),
+#                batch.Aq = n()/numberofcyc,
+#                D47full.stdev = sd(D47full), 
+#                D47full.mean = mean(D47full),
+#                D47.outlier.2sig = abs(D47full.mean-D47full)>abs(D47full.stdev*2),
+#                D47.outlier.3sig = abs(D47full.mean-D47full)>abs(D47full.stdev*3))
+
+d18O.mean <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  calc_means("d18O", "batch", "Identifier 1")
+
+p.ind.d18O <- flatlist.Cyc %>% 
+  ggplot() + 
+  geom_hline(
+    data = d18O.mean,
+    mapping = aes(yintercept = yintercept, linetype = linetype)) +
+  geom_point(aes(x=Analysis, y=d13C, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+
+d13C.mean <- 
+  flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  calc_means("d13C", "batch", "Identifier 1")
+
+p.ind.d13C <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_hline(
+    data = d13C.mean,
+    mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+  geom_point(aes(x=Analysis, y=d13C, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+
+p.ind.d13Cvd18O <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=d18O, y=d13C, fill=`Identifier 1`)) + 
+  geom_point(aes(shape = , shape = D47.outlier.2sig)) +
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw()
+
+D47.mean <- 
+  flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  calc_means("D47full", "batch", "Identifier 1")
+
+p.ind.D47 <- flatlist.Cyc %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_hline(
+    data = D47.mean,
+    mapping = aes(yintercept = yintercept, linetype = linetype, color = id)) +
+  geom_point(aes(x=Analysis, y=D47full, fill = `Identifier 1`, shape = D47.outlier.2sig)) +
+  scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+  scale_shape_manual(values = c(21,24)) +
+  facet_wrap(.~batch, scales = "free") +
+  theme_bw() +
+  guides(linetype = "none")
+
+p.ind.d18O
+
+p.ind.d13C
+
+p.ind.d13Cvd18O
+
+p.ind.D47
+
+# d18O.mean.outlier <- flatlist.Cyc.withsig %>% 
+#   filter(Donotuse != TRUE& Acqnum > 1) %>%
+#   #filter(batch>194) %>% 
+#   calc_means("d18O", "batch", "Identifier 1")
+# 
+# p.ind.d18O.outlier <- flatlist.Cyc.withsig %>% 
+#   #filter(batch>194) %>% 
+#   ggplot() + 
+#   geom_hline(
+#     data = d18O.mean.outlier,
+#     mapping = aes(yintercept = yintercept, linetype = linetype)) +
+#   geom_point(aes(x=Analysis, y=d18O, shape = d18O.outlier.2sig, fill= as.character(Acqnum), color= as.character(Acqnum))) +
+#   scale_linetype_manual(values = c(1, 3, 2, 3, 2)) + 
+#   scale_shape_manual(values = c(21,24)) +
+#   facet_wrap(.~batch, scales = "free") +
+#   theme_bw() +
+#   guides(linetype = "none")
+# 
+# ggplotly(p.ind.d18O.outlier)
+#clumped math with any outlier or for that mater the any bool
+```
+
+###clumped math with any outlier or for that mater the any bool 
+
+```{r clumped math with outlier}
+flatlist.Acq <- flatlist.Cyc %>%
+  filter(Donotuse != TRUE) %>%
+  clumpedCyctoAcquisition()
+
+flatlist.Acq.outlier<- flatlist.cyc.outlier(flatlist.Cyc, "Donotuse")
+
+write.csv(flatlist.Acq, paste0(session, "_flatlist.Acq.csv"))
+```
+
+looking at bulk isotope stdev at the acquisition level
+```{r d18Ostd and d13Cstd}
+pd18O <- flatlist.Acq %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=Analysis, y=d18O.stdev)) + 
+  stat_smooth(method = "lm") +
+  geom_point(aes(color=Preparation))
+  
+pd13C <- flatlist.Acq %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=Analysis, y=d13C.stdev)) + 
+  stat_smooth(method = "lm") +
+  geom_point(aes(color=`Preparation`))
+  
+subplot(pd18O,pd13C, nrows = 2) 
+```
+
+```{r D47std}
+pD47 <- flatlist.Acq %>%
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=Analysis, y=D47.stdev, color=`Preparation`)) + 
+  geom_point()
+  
+pD47.date <- flatlist.Acq %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=file_datetime, y=D47.stdev, color=`Preparation`)) + 
+  geom_point()
+  
+subplot(pD47,pD47.date,nrows = 2) 
+```
+
+```{r acqs-histograms}
+histograms <- flatlist.Acq %>%
+  filter(Donotuse != TRUE) %>%
+  gather(isotope, stdev, d13C.stdev, d18O.stdev, d47.stdev, d48.stdev, D47.stdev, D48.stdev) 
+  
+acq.sd <- histograms %>%
+  ggplot() +
+  geom_histogram(aes(x=stdev, fill=isotope), binwidth = .05) +
+  facet_wrap(isotope~., scales= "free")
+
+acq.sd2 <- histograms %>% filter(stdev < 2) %>%
+  ggplot() +
+  geom_histogram(aes(x=stdev, fill=isotope), binwidth = .001) +
+                   facet_wrap(isotope~., scales= "free")
+
+acq.sd
+acq.sd2
+```
+
+```{r D48 no zoom}
+pD48 <- flatlist.Acq %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=file_datetime, y=D48full, color=`Preparation`, label = Identifier1)) + 
+  geom_point() 
+
+pd48 <- flatlist.Acq %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot(aes(x=file_datetime, y=d48.stdev, color=`Preparation`, label = Identifier1)) + 
+  geom_point()
+
+subplot(pD48,pd48,nrows = 2) 
+```
+
+```{r last_culling}
+#last call for culling more samples, same syntax as above
+
+
+```
+
+
+## Makes a new flatlist with each line as a sample for use in part 2 of the data processing procedures
+```{r}
+standards.names <- c("TV04","Carrara.CIT", "ETH1","ETH2","ETH3")
+
+
+flatlist.Sam <- flatlist.Acq %>% 
+  filter(Donotuse != TRUE) %>%
+  group_by(batch.Aq) %>% 
+  summarise(
+                     Project = sub("\\$.*","", sub("//$.*", "", `Identifier1`))[1],
+                     User ="", 
+                     Date = file_datetime[1],
+                     Session = "NA",
+                     Sample.ID = sub(".*\\$","", sub(".*//$", "", `Identifier1`))[1],
+                     Type = if  (Sample.ID %in% standards.names){
+                                "standard"
+                                }
+                            else if (sub(".*_", "", Sample.ID) == "25")
+                            {
+                              "equilibrated gas"
+                            }
+                            else if (sub(".*_", "", Sample.ID) == "1000")
+                            {
+                              "heated gas"
+                            }
+                            else{
+                              "sample"
+                            },
+                     Donotuse = Donotuse[1],
+                     runinfo = runinfo[1],
+                     spec.num = Analysis[1], 
+                     mass=as.numeric(`Identifier2`[1]),
+                     num.acq=n(),
+                     Preparation = Preparation[1], 
+                     Yield = Yield[1], 
+                     Method = Method[1],
+                     d45.stdev= sd(d45),
+                     d45 = mean(d45),
+                     d46.stdev= sd(d46),
+                     d46 = mean(d46),
+                     d47.stdev= sd(d47),
+                     d47 = mean(d47),
+                     d48.stdev = sd(d48),
+                     d48 = mean(d48),
+                     d49.stdev = sd(d49),
+                     d49 = mean(d49),
+                     D47.stdev = sd(D47full),
+                     D47= mean(D47full),
+                     D48.stdev = sd(D48full), 
+                     D48= mean(D48full), 
+                     d13C.stdev= sd(d13C), 
+                     d13C =  mean(d13C), 
+                     d18O.stdev= sd(d18O),
+                     d18O.SMOW.gas = mean(d18O),
+                     d18O.VPDB.min = ((((d18O.SMOW.gas-30.86)/1.03086)+1000)/1.00821)-1000, #acid fac and SMOW to PDB conversion
+                     PB= mean(PB), 
+                     LeftPressure= mean(LeftPressure),
+                     RightPressure = mean(LeftPressure)
+                     )
+
+write.csv(flatlist.Sam, paste0(session, "_flatlist.csv"))
+```
+
+```{r Labelled Donotuse}
+#by cycle
+#print(flatlist.Cyc %>% filter(Donotuse==TRUE))
+
+#by acquisition
+#print(flatlist.Acq.Donotusetest <- flatlist.Cyc %>%
+  #filter(Donotuse != TRUE) %>%
+  #clumpedCyctoAcquisition() %>% 
+  #filter(Donotuse==TRUE))
+
+#by sample
+#print(flatlist.Sam.Donotusetest <- flatlist.Acq %>% filter(Donotuse==TRUE) %>%
+  #group_by(batch.Aq) %>% 
+  # #summarise(
+  #                    Project = sub("\\$.*","", sub("//$.*", "", `Identifier1`))[1],
+  #                    User ="", 
+  #                    Date = file_datetime[1],
+  #                    Session = "NA",
+  #                    Sample.ID = sub(".*\\$","", sub(".*//$", "", `Identifier1`))[1],
+  #                    Type = if  (Sample.ID %in% standards.names){
+  #                               "standard"
+  #                               }
+  #                           else if (sub(".*_", "", Sample.ID) == "25")
+  #                           {
+  #                             "equilibrated gas"
+  #                           }
+  #                           else if (sub(".*_", "", Sample.ID) == "1000")
+  #                           {
+  #                             "heated gas"
+  #                           }
+  #                           else{
+  #                             "sample"
+  #                           },
+  #                    Donotuse = Donotuse[1],
+  #                    runinfo = runinfo[1],
+  #                    spec.num = Analysis[1], 
+  #                    mass=as.numeric(`Identifier2`[1]),
+  #                    num.acq=n(),
+  #                    Preparation = Preparation[1], 
+  #                    Yield = Yield[1], 
+  #                    Method = Method[1],
+  #                    d45.stdev= sd(d45),
+  #                    d45 = mean(d45),
+  #                    d46.stdev= sd(d46),
+  #                    d46 = mean(d46),
+  #                    d47.stdev= sd(d47),
+  #                    d47 = mean(d47),
+  #                    d48.stdev = sd(d48),
+  #                    d48 = mean(d48),
+  #                    d49.stdev = sd(d49),
+  #                    d49 = mean(d49),
+  #                    D47.stdev = sd(D47full),
+  #                    D47= mean(D47full),
+  #                    D48.stdev = sd(D48full), 
+  #                    D48= mean(D48full), 
+  #                    d13C.stdev= sd(d13C), 
+  #                    d13C =  mean(d13C), 
+  #                    d18O.stdev= sd(d18O),
+  #                    d18O.SMOW.gas = mean(d18O),
+  #                    d18O.VPDB.min = ((((d18O.SMOW.gas-30.86)/1.03086)+1000)/1.00821)-1000, #acid fac and SMOW to PDB conversion
+  #                    PB= mean(PB), 
+  #                    LeftPressure= mean(LeftPressure),
+  #                    RightPressure = mean(LeftPressure)
+  #                    ))
+
+```
+
+
+##Plotting d18O and d13C by ID 
+```{r filtered bulk-crossplot-eachID 1, fig.height= 20, fig.width=20}
+ggplotly(flatlist.Cyc %>%
+  filter(`Identifier 1` == "RS$KS-2") %>% 
+  filter(Donotuse != TRUE) %>% 
+  ggplot(aes(x=d13C, y=D47full, color=Preparation, label = Analysis)) + 
+  geom_point()+
+  #facet_wrap(~ `Identifier 1` , scales = "free") +
+  theme_bw()
+ )
+```
+
+```{r datetime sensitivity}
+(flatlist.Acq %>%
+  filter(Donotuse != TRUE) %>% 
+  ggplot(aes(x=d18O, y=d13C, color=file_datetime, label = Analysis)) + 
+  geom_point()+
+  facet_wrap(~ `Identifier1` , scales = "free") +
+  theme_bw()
+ )
+```
+
+```{r discrimination correction}
+# base.directory<-file.path("..")  #change this to the file path that stores your "clump.functions.R" and "Standard.csv" files
+# Standards<-read.csv(file.path(base.directory, "D47acc_CU_042019.csv")) #steal from katie's folder
+# flatlist.Cyc.withsig.dis <- flatlist.Cyc.withsig %>% mutate( 
+#                      Project = sub("\\$.*","", sub("//$.*", "", `Identifier 1`)),
+#                      Sample.ID = sub(".*\\$","", sub(".*//$", "", `Identifier 1`))
+# ) %>% left_join(Standards, by= "Sample.ID") %>% rename(d13C.acc=d13C.y, d18O.acc=d18O.y) %>% ungroup() %>% 
+#      mutate(
+#        d13C = 
+#             lm(y ~ x, 
+#                data = data_frame(
+#                  x = d13C.x[!is.na(d13C.acc)], 
+#                  y = d13C.acc[!is.na(d13C.acc)])) %>% 
+#             predict(newdata = data_frame(x = d13C.x)) %>% 
+#             as.numeric(),
+#        d18O = 
+#             lm(y ~ x, 
+#                data = data_frame(
+#                  x = d18O.x[!is.na(d18O.acc)], 
+#                  y = d18O.acc[!is.na(d18O.acc)])) %>% 
+#             predict(newdata = data_frame(x = d18O.x)) %>% 
+#             as.numeric()
+#        )
+
+# clumpedbyCycafterdis <- function (combined_data, lambda = 0.528){
+#   R13VPDB <-  0.011237
+#   R18VSMOW <- 0.002005
+#   R17VSMOW <- 0.000380
+#   R47ZeroCO2 <-   4.65908E-05
+# 
+#   combined_data <- combined_data %>% mutate(
+#     d18O= 1.03086*d18O+30.86,# the data coming back in is in VPDB, this line changes it back to SMOW to compare to ref gas
+#     refR13 = ((`ref d 13C/12C`/1000)+1)*R13VPDB,
+#     refR18 = ((`ref d 18O/16O`/1000)+1)*R18VSMOW,
+#     refR17 = ((refR18/R18VSMOW)^lambda)*R17VSMOW,
+#     ref12C = 1/(1+refR13),
+#     ref13C = 1-ref12C,
+#     ref16O = 1/(1+refR18+refR17),
+#     ref18O = ref16O*refR18,
+#     ref17O = ref16O*refR17,
+#     sampleR13 = ((d13C/1000)+1)*R13VPDB,
+#     sampleR18 = ((d18O/1000)+1)*R18VSMOW,
+#     sampleR17 = ((sampleR18/R18VSMOW)^lambda)*R17VSMOW,
+#     sample12C = 1/(1+sampleR13),
+#     sample13C = 1-sample12C,
+#     sample16O = 1/(1+sampleR18+sampleR17),
+#     sample18O = sample16O*sampleR18,
+#     sample17O = sample16O*sampleR17,
+#     #blue box AV-AX
+#     refmass12.16.16 = ref12C*ref16O*ref16O,
+#     refmass12.16.17 = ref12C*ref16O*ref17O*2,
+#     refmass13.16.16 = ref13C*ref16O*ref16O,
+#     refmass12.16.18 = ref12C*ref16O*ref18O*2,
+#     refmass12.17.17 = ref12C*ref17O*ref17O,
+#     refmass13.17.16 = ref13C*ref17O*ref16O*2,
+#     refmass12.17.18 = ref12C*ref17O*ref18O*2,
+#     refmass13.16.18 = ref13C*ref16O*ref18O*2,
+#     refmass13.17.17 = ref13C*ref17O*ref17O,
+#     refmass12.18.18 = ref12C*ref18O*ref18O,
+#     refmass13.17.18 = ref13C*ref17O*ref18O*2,
+#     refmass13.18.18 = ref13C*ref18O*ref18O,
+# 
+#     samplemass12.16.16 = sample12C*sample16O*sample16O,
+#     samplemass12.16.17 = sample12C*sample16O*sample17O*2,
+#     samplemass13.16.16 = sample13C*sample16O*sample16O,
+#     samplemass12.16.18 = sample12C*sample16O*sample18O*2,
+#     samplemass12.17.17 = sample12C*sample17O*sample17O,
+#     samplemass13.17.16 = sample13C*sample17O*sample16O*2,
+#     samplemass12.17.18 = sample12C*sample17O*sample18O*2,
+#     samplemass13.16.18 = sample13C*sample16O*sample18O*2,
+#     samplemass13.17.17 = sample13C*sample17O*sample17O,
+#     samplemass12.18.18 = sample12C*sample18O*sample18O,
+#     samplemass13.17.18 = sample13C*sample17O*sample18O*2,
+#     samplemass13.18.18 = sample13C*sample18O*sample18O,
+#     #blue box AZ-BB
+#     ref44 = refmass12.16.16,
+#     ref45 = refmass12.16.17 + refmass13.16.16,
+#     ref46 = refmass12.16.18 + refmass12.17.17 + refmass13.17.16,
+#     ref47 = refmass12.17.18 + refmass13.16.18 + refmass13.17.17,
+#     ref48 = refmass12.18.18 + refmass13.17.18,
+#     ref49 = refmass13.18.18,
+# 
+#     sample44 = samplemass12.16.16,
+#     sample45 = samplemass12.16.17 + samplemass13.16.16,
+#     sample46 = samplemass12.16.18 + samplemass12.17.17 + samplemass13.17.16,
+#     sample47 = samplemass12.17.18 + samplemass13.16.18 + samplemass13.17.17,
+#     sample48 = samplemass12.18.18 + samplemass13.17.18,
+#     sample49 = samplemass13.18.18,
+# 
+#     refR45 = ref45/ref44,
+#     refR46 = ref46/ref44,
+#     refR47 = ref47/ref44,
+#     refR48 = ref48/ref44,
+#     refR49 = ref49/ref44,
+# 
+#     sampleR45 = sample45/sample44,
+#     sampleR46 = sample46/sample44,
+#     sampleR47 = sample47/sample44,
+#     sampleR48 = sample48/sample44,
+#     sampleR49 = sample49/sample44,
+# 
+#     # # gray box
+#     R45 = ((d45/1000)+1)*refR45,
+#     R46 = ((d46/1000)+1)*refR46,
+#     R47 = ((d47/1000)+1)*refR47,
+#     R48 = ((d48/1000)+1)*refR48,
+#     R49 = ((d49/1000)+1)*refR49,
+# 
+#     # #Yellow box
+#     D45 = ((R45/sampleR45)-1)*1000,
+#     D46 = ((R46/sampleR46)-1)*1000,
+#     D47 = ((R47/sampleR47)-1)*1000,
+#     D48 = ((R48/sampleR48)-1)*1000,
+#     D49 = ((R49/sampleR49)-1)*1000,
+# 
+#     D47full = D47-D46-D45,
+#     D48full = D48-D46-D46,
+#     D49full = D49-D46-D46-D45
+#    ) %>%
+#   group_by(file_id) %>% add_tally() %>%
+#     mutate(
+#       d45.stdev.Aq= sd(d45),
+#       d45.Aq = mean(d45),
+#       d46.stdev.Aq= sd(d46),
+#       d46.Aq = mean(d46),
+#       d47.stdev.Aq= sd(d47),
+#       d47.Aq = mean(d47),
+#       d48.stdev.Aq = sd(d48),
+#       d48.Aq = mean(d48),
+#       d49.stdev.Aq = sd(d49),
+#       d49.Aq = mean(d49),
+#       D47.stdev.Aq = sd(D47full),
+#       D47full.Aq= mean(D47full),
+#       D48.stdev.Aq = sd(D48full),
+#       D48full.Aq= mean(D48full),
+#       D49.stdev.Aq = sd(D49full),
+#       D49full.Aq= mean(D49full),
+#       d13C.stdev.Aq= sd(d13C),
+#       d13C.Aq =  mean(d13C),
+#       d18O.stdev.Aq= sd(d18O),
+#       d18O.VPDB.min.Aq = ((((mean(d18O)-30.86)/1.03086)+1000)/1.00821)-1000,
+#       d18O.Aq = mean(d18O),
+#       d18O.ref.Aq = `ref d 18O/16O`[1],
+#       d13C.ref.Aq = `ref d 13C/12C`[1],
+#       PB.Aq= mean(PB),
+#       LeftPressure.Aq= mean(LeftPressure),
+#       RightPressure.Aq = mean(LeftPressure),
+#       numberofcyc = n
+#     ) %>%
+#     ungroup %>%
+#     arrange(Analysis) %>%
+#     mutate(
+#       new_sample =  Preparation != c("", head(Preparation, -1))  | `Identifier 1` != c("", head(`Identifier 1`,-1)),
+#       batch = cumsum(new_sample)) %>%
+#     group_by(batch) %>% 
+#   mutate(id = row_number()) %>% 
+#   mutate(num.Aq = n()/numberofcyc) %>%
+#   ungroup %>%
+#   select(batch, file_id, Analysis, file_datetime, `Identifier 1`, `Identifier 2`, Donotuse, runinfo, everything())
+# }
+
+# flatlist.Cyc.withsig.dis <- clumpedbyCycafterdis(flatlist.Cyc.withsig.dis)
+# 
+# combined_data_group_wtihsig <- flatlist.Cyc.withsig %>%
+#   filter(Donotuse != TRUE) %>%
+#   clumpedCyctoAcquisition()
+# 
+# combined_data_group_dis <- flatlist.Cyc.withsig.dis %>%
+#   filter(Donotuse != TRUE) %>%
+#   clumpedCyctoAcquisition()
+```
+
