@@ -166,30 +166,46 @@ tictoc::toc()
 
 ```
 
+# PREPARE SAMPLE DATA
+
 ```{r}
-# 
-samplegasside_long_ratios <- samplegasside %>% 
-  gather(key = "ratio_name", value = "ratio_value", matches("^r\\d{2}o\\d{2}"))
-samplegasside_long_ratios_log <- samplegasside %>% 
-  gather(key = "ratio_name", value = "ratio_value", matches("^logr\\d{2}o\\d{2}"))
+# generate long format ratio data frame
+verticalize_ratios <- function(df) {
+  df <- df %>% 
+    select(Analysis, cycle, file_datetime, v44.mV, matches("^r\\d{2}o\\d{2}")) %>% 
+    gather(key = "ratio_name", value = "ratio_value", matches("^r\\d{2}o\\d{2}"))
+  stopifnot(nrow(df) == nrow(unique(df)))
+  return(df)
+}
+samplegasside_long_ratios <- samplegasside %>% verticalize_ratios()
+  
+
+# same in log space
+#samplegasside_long_ratios_log <- samplegasside %>% 
+#  gather(key = "ratio_name", value = "ratio_value", matches("^logr\\d{2}o\\d{2}"))
 
 # available standards data
-standards <- filter(samplegasside_long_ratios, `Identifier 1` == "Yellowstone")
-standardslog <- filter(samplegasside_long_ratios_log, `Identifier 1` == "Yellowstone")
+standards <- filter(samplegasside, `Identifier 1` == "Yellowstone") %>% verticalize_ratios()
+#standardslog <- filter(samplegasside_long_ratios_log, `Identifier 1` == "Yellowstone")
 
 # prepare sample data frame
 find_std_analyses_by_time_range <- function(sample_data, std_data, time_range) {
   date_range <- range(sample_data$file_datetime)
   date_range <- c(date_range[1] - time_range, date_range[2] + time_range)
   dplyr::filter(std_data, dplyr::between(file_datetime, !!date_range[1], !!date_range[2])) %>% 
-    dplyr::pull(Analysis) %>% unique()
+    dplyr::select(Analysis) %>% unique() %>% 
+    mutate(
+      weight = 1/length(Analysis),
+      v44_min.mV = min(sample_data$v44.mV, na.rm = TRUE),
+      v44_max.mV = max(sample_data$v44.mV, na.rm = TRUE)
+    ) 
 }
 pull_std_data_by_analyses_and_ratio <- function(analyses, ratio_name, std_data) {
-  dplyr::filter(std_data, Analysis %in% !!analyses, ratio_name == !!ratio_name) %>% 
+  dplyr::filter(std_data, Analysis %in% !!(analyses$Analysis), ratio_name == !!ratio_name) %>% 
     select(ratio_name, ratio_value, v44.mV)
 }
 samples <- samplegasside_long_ratios %>% 
-  nest(-Analysis, -ratio_name, .key = "sample_data") %>% 
+  nest(sample_data = c(-Analysis, -ratio_name)) %>% 
   # generate calibration data structure
   mutate(
     std_analyses = map(
@@ -208,8 +224,16 @@ samples <- samplegasside_long_ratios %>%
   ) %>% 
   arrange(Analysis, ratio_name)
 stopifnot(all(map_int(samples$std_analyses, length) > 0))
+```
+
+# GENERATE FITS
+
+```{r}
 # generate fits
-generate_std_fit <- function(std_data) {
+generate_std_fit <- function(std_data, std_analyses, voltage_range_expand.mV = 1000) {
+  # NOTE: could use std_analyses and do a left_join with std_data for a 
+  # v44.mV > v44_min.mV - voltrage_range_expand.mV & v44.mV > v44_max.Mv + voltrage_range_expand.mV
+  # right now std_analyses is not used here for this cutoff
   stats::glm(ratio_value ~ v44.mV, data = std_data)
   #add exp here
 }
@@ -220,18 +244,26 @@ apply_std_fit <- function(sample_data, std_fit) {
   
   mutate(sample_data,
          std_ratio_value = std_fit_predict$fit,
-         std_ratio_se = std_fit_predict$se.fit
+         std_ratio_se = std_fit_predict$se.fit,
+         delta = (ratio_value / std_ratio_value - 1) * 1000
+         # could also think about prpagating the std_ratio_se
   )
 }
 samples_with_fit <- 
   samples %>% 
-  # apply calibration
   mutate(
-    std_fit = map(
+    # generate calibration
+    # NOTE: in future versions, this should NOT take all standard data
+    # but add a new column within the std_analyses that contains a seperate
+    # fit for each analysis whose result can then be effectively weighed based
+    # on the weighting parameters
+    std_fit = map2(
       .x = std_data, 
+      .y = std_analyses,
       .f = generate_std_fit
     ),
     fit_summary = map(std_fit, broom::glance),
+    # apply calibration
     sample_data = map2(
       .x = sample_data,
       .y = std_fit,
@@ -240,6 +272,71 @@ samples_with_fit <-
   )
 
 ```
+
+# SPREAD & MERGE DATA
+
+```{r}
+samples_unnested <- 
+  samples_with_fit %>% 
+  select(Analysis, ratio_name, sample_data) %>% 
+  unnest(sample_data) %>% 
+  select(Analysis, cycle, ratio_name, std_ratio_value, std_ratio_se, delta) 
+std_ratio_values <- 
+  samples_unnested %>% mutate(column_name = paste0("std_", ratio_name)) %>% 
+  select(Analysis, cycle, column_name, std_ratio_value) %>% 
+  spread(column_name, std_ratio_value)
+std_ratio_ses <- 
+  samples_unnested %>% mutate(column_name = paste0("std_", ratio_name, "_se")) %>% 
+  select(Analysis, cycle, column_name, std_ratio_se) %>% 
+  spread(column_name, std_ratio_se)
+sample_deltas <- 
+  samples_unnested %>% mutate(column_name = stringr::str_replace(ratio_name, "^r(\\d+).*$", "d\\1")) %>% 
+  select(Analysis, cycle, column_name, delta) %>% 
+  spread(column_name, delta)
+
+final_data <-
+  samplegasside %>% 
+  left_join(std_ratio_values, by = c("Analysis", "cycle")) %>% 
+  left_join(std_ratio_ses, by = c("Analysis", "cycle")) %>% 
+  left_join(sample_deltas, by = c("Analysis", "cycle")) %>% 
+  mutate(
+    Donotuse="",
+    runinfo=""
+  )
+```
+
+```{r}
+(final_data %>% 
+  ggplot() +
+  aes(v44.mV, d47, color = `Identifier 1`) +
+  geom_point() + facet_wrap(~`Identifier 1`, scales = "free")) %>% 
+  isoprocessor::iso_mark_value_range(mean = TRUE, sd = 1:3) 
+```
+
+# USE IT
+
+```{r}
+final_data_clumpy_party <- final_data %>% clumpedbyCyc_withfit()
+
+final_data_clumpy_party %>% 
+  ggplot() +
+  aes(x = d47, y = D47full, color = `Identifier 1`) + 
+  geom_point()
+
+flatlistbycyc <- clumpedbyCyc(rawdata)
+
+d18Od13Cfit <- final_data_clumpy_party %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=d18O, y=d13C))
+d18Od13Cnormal <- flatlistbycyc %>% filter(Analysis>34842 &Analysis<34843 ) %>% 
+  filter(Donotuse != TRUE) %>%
+  ggplot() + 
+  geom_point(aes(x=d18O, y=d13C))
+subplot(d18Od13Cfit,d18Od13Cnormal)
+```
+
+
 ```{r playing}
 unnestestedfit <- unnest(samples_with_fit, sample_data, fit_summary)
 unnestestedfit %>% ggplot()+
@@ -314,7 +411,8 @@ write.csv(select(unnestestedfit, -measurement_info, -std_data, -std_fit, -std_an
 
 
 ```{r}
-samplegasside_long_ratios_withfit <- samples_with_fit %>% unnest(sample_data) %>% 
+samplegasside_long_ratios_withfit <- 
+  samples_with_fit %>% unnest(sample_data) %>% 
             filter(Analysis==34842 & cycle %in% c(1:150))  %>% group_by(cycle) %>% #& cycle %in% c(1,2,3,4,5,6,7,8)
             spread(ratio_name,ratio_value,sep = "_") %>% summarise_all(funs(ifelse(is.numeric(.),mean(.,na.rm=T),.)))
 samplegasside_long_ratios_withfit

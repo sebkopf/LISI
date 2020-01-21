@@ -1,6 +1,6 @@
 ```{r}
 clumpedbyCyc_withfit <-  function (rawdata, ref_17R = 0.000393, ref_13R = 0.01118, ref_18R = 0.00208835, lambda = 0.528, d_max = 1000) {
-  raw_data_w_measurement_info <- rawdata %>% nest(-file_id) %>% 
+  raw_data_w_measurement_info <- rawdata %>% nest(data = c(-file_id)) %>% 
     mutate(mi = map(data, ~.x$measurement_info[[1]]), mi_select = map(mi, 
       ~data_frame(Yield = pick_mi(.x, "left side"), lp = pick_mi(.x, 
         "l_p"), rp = pick_mi(.x, "r_p"), pc = pick_mi(.x, 
@@ -19,14 +19,15 @@ clumpedbyCyc_withfit <-  function (rawdata, ref_17R = 0.000393, ref_13R = 0.0111
     select(file_id, delta_name, delta_value) %>% mutate(delta_name = str_c("ref ", 
     delta_name)) %>% spread(delta_name, delta_value)
   
-  combined_data <- raw_data_w_measurement_info %>%
-    mutate( 
-    d45 = (ratio_name_r45o44/std_ratio_value-1)*1000,
-    d46 = (ratio_name_r46o44-1)*1000,
-    d47 = (ratio_name_r47o44-1)*1000,
-    d48 = (ratio_name_r48o44-1)*1000,
-    d49 = (ratio_name_r49o44-1)*1000
-    )
+  combined_data <- raw_data_w_measurement_info
+  # combined_data <- raw_data_w_measurement_info %>%
+  #   mutate( 
+  #   d45 = (ratio_name_r45o44/std_ratio_value-1)*1000,
+  #   d46 = (ratio_name_r46o44-1)*1000,
+  #   d47 = (ratio_name_r47o44-1)*1000,
+  #   d48 = (ratio_name_r48o44-1)*1000,
+  #   d49 = (ratio_name_r49o44-1)*1000
+  #   )
     
   combined_data <- left_join(combined_data, isostandards, 
     "file_id")
